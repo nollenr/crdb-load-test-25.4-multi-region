@@ -138,17 +138,42 @@ Suggested caption:
 
 > CockroachDB node CPU remained well below saturation during the benchmark, indicating additional throughput headroom in the cluster.
 
-## Suggested Additions
+## Open SQL Sessions
 
-If we want this readout to be even stronger, I recommend adding:
+![Open SQL Sessions](resources/Open-SQL-Sessions.png)
 
-- A screenshot of SQL sessions / connections during the run
-- The exact benchmark commands used for:
-  - less aggressive client
-  - more aggressive client
-- A short explanation that `1 logical unit = 7 inserted records`
-- A one-line explanation of `aggressive client`:
-  sending multiple full transaction blocks before pipeline sync
-- A note that the final customer-facing numbers use realistic `250-300 byte` row payloads
-- Optional:
-  a short appendix with the old-schema baseline to show how row payload size affected throughput
+Suggested caption:
+
+> Open SQL sessions rose during the benchmark as the regional app nodes maintained multiple concurrent client connections to drive sustained write throughput.
+
+## SQL Queries Per Second
+
+![SQL Queries Per Second](resources/SQL-Queries-Per-Second.png)
+
+Suggested caption:
+
+> SQL query rate increased significantly during the benchmark window, reflecting the sustained multi-region insert workload delivered by the app nodes.
+
+## Network Bytes Sent
+
+![Network Bytes Sent](resources/Network-Bytes-Sent.png)
+
+Suggested caption:
+
+> Network bytes sent increased during the run as each region continuously streamed insert traffic to CockroachDB.
+
+## Service Latency P90
+
+![Service Latency P90](resources/Service-Latency-p90.png)
+
+Suggested caption:
+
+> P90 service latency remained in a manageable range during the benchmark, indicating the cluster continued to absorb the distributed write workload without visible saturation.
+
+## Service Latency P99
+
+![Service Latency P99](resources/Service-Latency-p99.png)
+
+Suggested caption:
+
+> P99 service latency rose modestly under load but remained stable enough to support the observed sustained records-per-second rates across all three regions.
