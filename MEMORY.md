@@ -49,6 +49,8 @@
 24. The pipeline benchmark should support an optional deeper batching style to push more work per connection.
 25. Benchmark output should include latency stats such as average, p95, and p99.
 26. The benchmark rows should now include variable-length payload text so inserted row payload lands roughly in the 250-300 byte range.
+27. The benchmark schema should now include many more non-key columns to better resemble a real customer table.
+28. Extra secondary indexes should remain separate from table creation and be applied from standalone SQL files.
 
 ## Implementation Notes
 - The benchmark script uses `psycopg3` plus `psycopg_pool`; SQLAlchemy was not necessary.
@@ -94,6 +96,15 @@
   - `table_b` also uses a richer `attributes` JSON document
   - payload text lengths vary deterministically by row
   - the goal is roughly `250-300 bytes` of inserted data per row, not an exact physical on-disk size
+- Schema widening update:
+  - each table now includes many more business-style non-key columns
+  - this provides realistic candidate columns for secondary indexing tests
+  - separate index profile files were added:
+    - `indexes_5.sql`
+    - `indexes_10.sql`
+  - index counts are now per table:
+    - `indexes_5.sql` = 5 secondary indexes on each table
+    - `indexes_10.sql` = 10 secondary indexes on each table
 
 ## Connection Notes
 - The user confirmed the real `DB_URI` will already be in `postgresql://...` format, so no URI rewrite should be needed for the current environment.
@@ -104,6 +115,8 @@
 ## Files Created
 - `aggregate_results.py`
 - `benchmark_crdb_pipeline.py`
+- `indexes_5.sql`
+- `indexes_10.sql`
 - `README.md`
 - `RESULTS-READOUT.md`
 - `requirements.txt`
@@ -118,6 +131,10 @@
   - `export DB_URI='postgresql://...'`
 - Recreate only the tables:
   - `python benchmark_crdb_pipeline.py --setup-only`
+- Apply 5 indexes:
+  - `cockroach sql --url "$DB_URI" < indexes_5.sql`
+- Apply 10 indexes:
+  - `cockroach sql --url "$DB_URI" < indexes_10.sql`
 - Run the full benchmark:
   - `python benchmark_crdb_pipeline.py --iterations 10000`
 - Run with multiple workers:
@@ -177,6 +194,29 @@
 - A `requirements.txt` file was added with `psycopg[binary]` and `psycopg_pool` to make setup reproducible.
 - `benchmark_crdb_pipeline.py` passed a local syntax compile check via `python -m compileall`.
 - `aggregate_results.py` is intended to sum throughput across separately collected regional JSON result files for the same benchmark mode.
+- After widening the schema for index-testing, the insert SQL placeholder counts briefly fell out of sync with the new column counts.
+- This caused deep-pipeline runs to fail immediately with a generic batch error after `--setup-only`.
+- The insert SQL for `table_a` through `table_d` was corrected so each `VALUES` list now matches the widened schema, and deep-pipeline errors now include the underlying database exception text.
 
 ## Workspace Notes
 - Initial workspace scan suggests the directory was empty before creating these files.
+- Added `RESULTS-READOUT-INDEX.md` to track multi-region rows/sec as index counts increase.
+- Current baseline for the widened schema with no extra secondary indexes, aggressive client, 3 regions:
+  - aggregate rows/sec: `31,319.52`
+  - east-2: `11,076.80`
+  - west-2: `10,276.58`
+  - east-1: `9,966.13`
+- Added `5 indexes per table` aggressive-client result to `RESULTS-READOUT-INDEX.md`:
+  - rerun aggregate rows/sec: `30,754.27`
+  - change vs baseline: `-565.25` rows/sec (`-1.80%`)
+  - east-2: `10,079.07`
+  - west-2: `10,779.07`
+  - east-1: `9,896.13`
+  - the earlier `23,530.62` rows/sec run is treated as noisy because `aws-us-west-2` was a major outlier
+- Added `10 indexes per table` aggressive-client result to `RESULTS-READOUT-INDEX.md`:
+  - rerun aggregate rows/sec: `17,858.40`
+  - change vs baseline: `-13,461.12` rows/sec (`-42.98%`)
+  - east-2: `6,618.27`
+  - west-2: `4,440.80`
+  - east-1: `6,799.33`
+  - the earlier `13,677.07` rows/sec run is treated as noisy because `aws-us-west-2` was a major outlier

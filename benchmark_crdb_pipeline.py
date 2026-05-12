@@ -56,9 +56,19 @@ DDL_STATEMENTS = (
         benchmark_run_id UUID NOT NULL,
         logical_txn_id UUID NOT NULL,
         tenant_code STRING NOT NULL,
+        account_ref STRING NOT NULL,
+        customer_segment STRING NOT NULL,
+        source_region STRING NOT NULL,
         amount DECIMAL(18, 2) NOT NULL,
+        tax_amount DECIMAL(18, 2) NOT NULL,
+        fee_amount DECIMAL(18, 2) NOT NULL,
         event_ts TIMESTAMPTZ NOT NULL,
+        settled_at TIMESTAMPTZ NOT NULL,
+        effective_date DATE NOT NULL,
+        priority_code INT8 NOT NULL,
         is_active BOOL NOT NULL,
+        is_reversal BOOL NOT NULL,
+        score_bucket INT8 NOT NULL,
         payload_text STRING NOT NULL
     ) LOCALITY REGIONAL BY ROW
     """,
@@ -68,8 +78,18 @@ DDL_STATEMENTS = (
         benchmark_run_id UUID NOT NULL,
         logical_txn_id UUID NOT NULL,
         order_ref STRING NOT NULL,
+        merchant_id STRING NOT NULL,
+        channel_code STRING NOT NULL,
+        currency_code STRING NOT NULL,
         processing_date DATE NOT NULL,
+        submission_date DATE NOT NULL,
         retry_count INT8 NOT NULL,
+        batch_number INT8 NOT NULL,
+        approval_code STRING NOT NULL,
+        authorization_ts TIMESTAMPTZ NOT NULL,
+        clearing_ts TIMESTAMPTZ NOT NULL,
+        is_manual_review BOOL NOT NULL,
+        region_code STRING NOT NULL,
         attributes JSONB NOT NULL,
         payload_text STRING NOT NULL
     ) LOCALITY REGIONAL BY ROW
@@ -80,9 +100,19 @@ DDL_STATEMENTS = (
         benchmark_run_id UUID NOT NULL,
         logical_txn_id UUID NOT NULL,
         source_system STRING NOT NULL,
+        workflow_name STRING NOT NULL,
+        owner_team STRING NOT NULL,
         risk_score FLOAT8 NOT NULL,
+        model_version STRING NOT NULL,
         status STRING NOT NULL,
         created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        status_date DATE NOT NULL,
+        review_count INT8 NOT NULL,
+        escalation_level INT8 NOT NULL,
+        is_final BOOL NOT NULL,
+        reserve_amount DECIMAL(18, 2) NOT NULL,
+        case_type STRING NOT NULL,
         payload_text STRING NOT NULL
     ) LOCALITY REGIONAL BY ROW
     """,
@@ -93,8 +123,18 @@ DDL_STATEMENTS = (
         logical_txn_id UUID NOT NULL,
         line_number INT8 NOT NULL,
         sku STRING NOT NULL,
+        category_code STRING NOT NULL,
+        warehouse_code STRING NOT NULL,
         quantity INT8 NOT NULL,
         unit_price DECIMAL(18, 2) NOT NULL,
+        extended_price DECIMAL(18, 2) NOT NULL,
+        discount_amount DECIMAL(18, 2) NOT NULL,
+        tax_code STRING NOT NULL,
+        shipment_date DATE NOT NULL,
+        promised_date DATE NOT NULL,
+        fulfillment_ts TIMESTAMPTZ NOT NULL,
+        is_backordered BOOL NOT NULL,
+        line_status STRING NOT NULL,
         payload_text STRING NOT NULL
     ) LOCALITY REGIONAL BY ROW
     """,
@@ -105,12 +145,22 @@ INSERT_A_SQL = """
         benchmark_run_id,
         logical_txn_id,
         tenant_code,
+        account_ref,
+        customer_segment,
+        source_region,
         amount,
+        tax_amount,
+        fee_amount,
         event_ts,
+        settled_at,
+        effective_date,
+        priority_code,
         is_active,
+        is_reversal,
+        score_bucket,
         payload_text
     )
-    VALUES (%s, %s, %s, %s, %s, %s, %s)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 """
 
 INSERT_B_SQL = """
@@ -118,12 +168,22 @@ INSERT_B_SQL = """
         benchmark_run_id,
         logical_txn_id,
         order_ref,
+        merchant_id,
+        channel_code,
+        currency_code,
         processing_date,
+        submission_date,
         retry_count,
+        batch_number,
+        approval_code,
+        authorization_ts,
+        clearing_ts,
+        is_manual_review,
+        region_code,
         attributes,
         payload_text
     )
-    VALUES (%s, %s, %s, %s, %s, %s::JSONB, %s)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::JSONB, %s)
 """
 
 INSERT_C_SQL = """
@@ -131,12 +191,22 @@ INSERT_C_SQL = """
         benchmark_run_id,
         logical_txn_id,
         source_system,
+        workflow_name,
+        owner_team,
         risk_score,
+        model_version,
         status,
         created_at,
+        updated_at,
+        status_date,
+        review_count,
+        escalation_level,
+        is_final,
+        reserve_amount,
+        case_type,
         payload_text
     )
-    VALUES (%s, %s, %s, %s, %s, %s, %s)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 """
 
 INSERT_D_SQL = """
@@ -145,15 +215,25 @@ INSERT_D_SQL = """
         logical_txn_id,
         line_number,
         sku,
+        category_code,
+        warehouse_code,
         quantity,
         unit_price,
+        extended_price,
+        discount_amount,
+        tax_code,
+        shipment_date,
+        promised_date,
+        fulfillment_ts,
+        is_backordered,
+        line_status,
         payload_text
     )
     VALUES
-        (%s, %s, %s, %s, %s, %s, %s),
-        (%s, %s, %s, %s, %s, %s, %s),
-        (%s, %s, %s, %s, %s, %s, %s),
-        (%s, %s, %s, %s, %s, %s, %s)
+        (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s),
+        (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s),
+        (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s),
+        (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 """
 
 
@@ -460,16 +540,45 @@ def build_iteration_payload(sequence_no: int, seed: int, benchmark_run_id: UUID)
     base_ts = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
     txn_id = uuid4()
     tenant_code = f"TENANT-{(seed + sequence_no) % 97:02d}"
+    account_ref = f"ACCT-{seed:04d}-{sequence_no:09d}"
+    customer_segment = ("consumer", "smb", "enterprise")[sequence_no % 3]
+    source_region = ("us-east-1", "us-east-2", "us-west-2")[sequence_no % 3]
     order_ref = f"ORDER-{seed:04d}-{sequence_no:09d}"
+    merchant_id = f"MERCHANT-{(seed + sequence_no) % 500:04d}"
+    channel_code = ("card", "ach", "wallet")[sequence_no % 3]
+    currency_code = ("USD", "EUR", "GBP")[sequence_no % 3]
     source_system = f"source-{(sequence_no % 5) + 1}"
+    workflow_name = f"workflow-{(sequence_no % 4) + 1}"
+    owner_team = ("fraud", "clearing", "settlement", "ops")[sequence_no % 4]
     status = ("pending", "approved", "settled")[sequence_no % 3]
     event_ts = base_ts + timedelta(milliseconds=sequence_no * 11)
+    settled_at = event_ts + timedelta(seconds=(sequence_no % 5) + 1)
     processing_day = date(2026, 1, 1) + timedelta(days=sequence_no % 28)
+    submission_day = processing_day - timedelta(days=sequence_no % 2)
     created_at = base_ts + timedelta(milliseconds=(sequence_no * 11) + 3)
+    updated_at = created_at + timedelta(seconds=(sequence_no % 7) + 1)
     amount = Decimal(100 + (sequence_no % 31)) + (Decimal(sequence_no % 100) / Decimal("100"))
+    tax_amount = Decimal((sequence_no % 17) + 1) + (Decimal(sequence_no % 20) / Decimal("100"))
+    fee_amount = Decimal((sequence_no % 9) + 1) + (Decimal(sequence_no % 10) / Decimal("100"))
     risk_score = round(((sequence_no * 37) % 1000) / 10.0, 2)
     retry_count = sequence_no % 4
+    batch_number = sequence_no % 32
+    approval_code = f"APR-{(seed + sequence_no) % 100000:05d}"
+    authorization_ts = event_ts + timedelta(milliseconds=4)
+    clearing_ts = event_ts + timedelta(milliseconds=9)
     is_active = (sequence_no % 2) == 0
+    is_reversal = (sequence_no % 11) == 0
+    priority_code = sequence_no % 5
+    score_bucket = sequence_no % 10
+    model_version = f"v{(sequence_no % 3) + 1}.{(sequence_no % 5) + 1}"
+    status_date = processing_day
+    review_count = sequence_no % 6
+    escalation_level = sequence_no % 4
+    is_final = (sequence_no % 3) == 2
+    reserve_amount = Decimal((sequence_no % 23) + 2) + (Decimal(sequence_no % 50) / Decimal("100"))
+    case_type = ("review", "monitor", "chargeback", "release")[sequence_no % 4]
+    is_manual_review = (sequence_no % 8) == 0
+    region_code = ("ue1", "ue2", "uw2")[sequence_no % 3]
     table_a_payload = sized_payload_text(
         "table_a",
         sequence_no,
@@ -516,6 +625,18 @@ def build_iteration_payload(sequence_no: int, seed: int, benchmark_run_id: UUID)
         unit_price = Decimal(5 * line_number) + (
             Decimal((sequence_no + line_number) % 100) / Decimal("100")
         )
+        extended_price = unit_price * quantity
+        discount_amount = Decimal((sequence_no + line_number) % 4) + (
+            Decimal((sequence_no + line_number) % 20) / Decimal("100")
+        )
+        category_code = f"CAT-{((sequence_no + line_number) % 12) + 1:02d}"
+        warehouse_code = f"WH-{((sequence_no + line_number) % 7) + 1:02d}"
+        tax_code = ("TX-A", "TX-B", "TX-C", "TX-D")[(sequence_no + line_number) % 4]
+        shipment_date = processing_day + timedelta(days=line_number)
+        promised_date = shipment_date + timedelta(days=(sequence_no + line_number) % 3)
+        fulfillment_ts = event_ts + timedelta(minutes=line_number)
+        is_backordered = ((sequence_no + line_number) % 10) == 0
+        line_status = ("open", "picked", "packed", "shipped")[(sequence_no + line_number) % 4]
         table_d_payload = sized_payload_text(
             "table_d",
             sequence_no,
@@ -529,8 +650,18 @@ def build_iteration_payload(sequence_no: int, seed: int, benchmark_run_id: UUID)
                 txn_id,
                 line_number,
                 f"SKU-{(seed + sequence_no) % 200:03d}-{line_number}",
+                category_code,
+                warehouse_code,
                 quantity,
                 unit_price,
+                extended_price,
+                discount_amount,
+                tax_code,
+                shipment_date,
+                promised_date,
+                fulfillment_ts,
+                is_backordered,
+                line_status,
                 table_d_payload,
             )
         )
@@ -538,13 +669,41 @@ def build_iteration_payload(sequence_no: int, seed: int, benchmark_run_id: UUID)
     return IterationPayload(
         benchmark_run_id=benchmark_run_id,
         logical_txn_id=txn_id,
-        table_a_params=(benchmark_run_id, txn_id, tenant_code, amount, event_ts, is_active, table_a_payload),
+        table_a_params=(
+            benchmark_run_id,
+            txn_id,
+            tenant_code,
+            account_ref,
+            customer_segment,
+            source_region,
+            amount,
+            tax_amount,
+            fee_amount,
+            event_ts,
+            settled_at,
+            processing_day,
+            priority_code,
+            is_active,
+            is_reversal,
+            score_bucket,
+            table_a_payload,
+        ),
         table_b_params=(
             benchmark_run_id,
             txn_id,
             order_ref,
+            merchant_id,
+            channel_code,
+            currency_code,
             processing_day,
+            submission_day,
             retry_count,
+            batch_number,
+            approval_code,
+            authorization_ts,
+            clearing_ts,
+            is_manual_review,
+            region_code,
             attributes,
             table_b_payload,
         ),
@@ -552,9 +711,19 @@ def build_iteration_payload(sequence_no: int, seed: int, benchmark_run_id: UUID)
             benchmark_run_id,
             txn_id,
             source_system,
+            workflow_name,
+            owner_team,
             risk_score,
+            model_version,
             status,
             created_at,
+            updated_at,
+            status_date,
+            review_count,
+            escalation_level,
+            is_final,
+            reserve_amount,
+            case_type,
             table_c_payload,
         ),
         table_d_params=tuple(d_params),
@@ -645,7 +814,8 @@ def worker_iteration_loop(
             except psycopg.Error as exc:
                 raise RuntimeError(
                     "Deep pipeline batch failed. Safe automatic retry is disabled for multi-transaction "
-                    "pipeline batches because successful earlier transactions in the batch may already be committed."
+                    "pipeline batches because successful earlier transactions in the batch may already be committed. "
+                    f"Database error: {exc}"
                 ) from exc
 
             batch_elapsed_ms = (perf_counter() - batch_started) * 1000.0
@@ -737,7 +907,8 @@ def worker_duration_loop(
             except psycopg.Error as exc:
                 raise RuntimeError(
                     "Deep pipeline batch failed. Safe automatic retry is disabled for multi-transaction "
-                    "pipeline batches because successful earlier transactions in the batch may already be committed."
+                    "pipeline batches because successful earlier transactions in the batch may already be committed. "
+                    f"Database error: {exc}"
                 ) from exc
 
             batch_elapsed_ms = (perf_counter() - batch_started) * 1000.0

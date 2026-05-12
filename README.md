@@ -124,6 +124,33 @@ Each table also includes a `benchmark_run_id UUID` column. This lets each runner
 
 Each benchmark row also includes variable-length payload text so the inserted row payload is roughly in the `250-300 byte` range. The exact size varies a bit by row and table on purpose so the workload looks more realistic.
 
+The schema has also been widened with many more non-key columns so it more closely resembles a customer table that may carry many secondary indexes.
+
+## Index Profiles
+
+Index creation is intentionally separate from table creation.
+
+Available index-profile files:
+
+- `indexes_5.sql`
+  Adds 5 secondary indexes per table
+- `indexes_10.sql`
+  Adds 10 secondary indexes per table
+
+Recommended workflow:
+
+1. Recreate the tables:
+   `python3.11 benchmark_crdb_pipeline.py --setup-only`
+2. Apply one index profile:
+   `cockroach sql --url "$DB_URI" < indexes_5.sql`
+3. Run the benchmark
+
+This lets you compare:
+
+- no extra indexes
+- 5 extra indexes per table
+- 10 extra indexes per table
+
 ## Requirements
 
 - Python 3.11 or compatible newer Python
@@ -164,6 +191,18 @@ python3.11 benchmark_crdb_pipeline.py --setup-only
 ```
 
 After schema changes such as payload-column updates, run `--setup-only` or `--setup-tables` once before benchmarking so the benchmark tables match the current script.
+
+Apply the 5-index profile:
+
+```bash
+cockroach sql --url "$DB_URI" < indexes_5.sql
+```
+
+Apply the 10-index profile:
+
+```bash
+cockroach sql --url "$DB_URI" < indexes_10.sql
+```
 
 Recreate the tables, then run only the non-pipeline benchmark:
 
@@ -403,9 +442,9 @@ python3.11 aggregate_results.py pipeline.json \
   --remote-host 192.168.4.125 \
   --remote-host 192.168.5.113 \
   --remote-file pipeline.json
-  
+
+-- use this to aggregate files from the pipeline-deep  
 python3.11 aggregate_results.py pipeline-deep.json \
   --remote-host 192.168.4.125 \
   --remote-host 192.168.5.113 \
   --remote-file pipeline-deep.json
-
