@@ -12,6 +12,7 @@ import socket
 import sys
 import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -253,6 +254,7 @@ class WorkerOutcome:
     iterations_completed: int
     retry_count: int
     latencies_ms: list[float]
+    gateway_region: str
 
 
 @dataclass(frozen=True)
@@ -268,6 +270,7 @@ class ProcessConfig:
     total_workers: int
     db_uri: str
     benchmark_run_id: UUID
+    warmup_benchmark_run_id: UUID | None
     mode: str
     pipeline_style: str
     pipeline_depth: int
@@ -276,8 +279,13 @@ class ProcessConfig:
     work_mode: str
     iterations: int
     duration_seconds: float | None
+    warmup_seconds: float
     seed: int
     application_name_prefix: str
+    workload_start_event: object
+    measurement_start_event: object
+    workload_start_epoch: object
+    measurement_start_epoch: object
 
 
 @dataclass(frozen=True)
@@ -303,6 +311,10 @@ class BenchmarkResult:
     pipeline_style: str
     pipeline_depth: int
     application_name_prefix: str
+    gateway_connection_counts: dict[str, int]
+    warmup_seconds: float
+    requested_duration_seconds: float | None
+    warmup_benchmark_run_id: UUID | None
 
 
 class ProgressTracker:
@@ -317,6 +329,11 @@ class ProgressTracker:
         self.progress_seconds = progress_seconds
         self.total_iterations = total_iterations
         self.duration_seconds = duration_seconds
+        self.started = perf_counter()
+        self.completed = 0
+        self.retries = 0
+
+    def reset(self) -> None:
         self.started = perf_counter()
         self.completed = 0
         self.retries = 0
@@ -368,6 +385,12 @@ def parse_args() -> argparse.Namespace:
         "--duration-seconds",
         type=float,
         help="Run in sustained duration mode for this many seconds instead of fixed-iteration mode.",
+    )
+    parser.add_argument(
+        "--warmup-seconds",
+        type=float,
+        default=0.0,
+        help="Additional warmup time to run before measured duration mode begins. Default: 0",
     )
     parser.add_argument(
         "--mode",
@@ -783,18 +806,37 @@ def flush_progress(
     )
 
 
+def detect_connection_gateway_region(conn: psycopg.Connection) -> str:
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT gateway_region()")
+            row = cur.fetchone()
+            if row and row[0]:
+                return str(row[0])
+    except Exception as exc:
+        log(f"Could not detect gateway_region() for a worker connection. Using 'unknown'. Reason: {exc}")
+        return "unknown"
+
+    log("gateway_region() returned no value for a worker connection. Using 'unknown'.")
+    return "unknown"
+
+
+def wait_for_workload_start(config: ProcessConfig) -> None:
+    config.workload_start_event.wait()
+
+
 def worker_iteration_loop(
     conn: psycopg.Connection,
     config: ProcessConfig,
     worker_global_id: int,
     progress_queue: mp.Queue,
+    gateway_region: str,
 ) -> WorkerOutcome:
     latencies_ms: list[float] = []
     retries_total = 0
     completed_total = 0
     progress_completed = 0
     progress_retries = 0
-
     sequence_no = worker_global_id
     while sequence_no < config.iterations:
         payload = build_iteration_payload(sequence_no, config.seed, config.benchmark_run_id)
@@ -868,6 +910,7 @@ def worker_iteration_loop(
         iterations_completed=completed_total,
         retry_count=retries_total,
         latencies_ms=latencies_ms,
+        gateway_region=gateway_region,
     )
 
 
@@ -876,29 +919,55 @@ def worker_duration_loop(
     config: ProcessConfig,
     worker_global_id: int,
     progress_queue: mp.Queue,
-    started_at_epoch: float,
+    gateway_region: str,
 ) -> WorkerOutcome:
     assert config.duration_seconds is not None
-    stop_at_epoch = started_at_epoch + config.duration_seconds
     latencies_ms: list[float] = []
     retries_total = 0
     completed_total = 0
     progress_completed = 0
     progress_retries = 0
     local_counter = 0
+    warmup_deadline_epoch = config.workload_start_epoch.value + config.warmup_seconds
+    measurement_deadline_epoch = 0.0
+    measurement_started = config.warmup_seconds == 0
+    if measurement_started:
+        measurement_deadline_epoch = config.measurement_start_epoch.value + config.duration_seconds
 
-    while time.time() < stop_at_epoch:
+    while True:
+        now = time.time()
+        if measurement_started:
+            if now >= measurement_deadline_epoch:
+                break
+            benchmark_run_id = config.benchmark_run_id
+        else:
+            if now >= warmup_deadline_epoch:
+                progress_queue.put(
+                    {
+                        "type": "warmup_ready",
+                        "process_id": config.process_id,
+                        "worker_id": worker_global_id,
+                    }
+                )
+                config.measurement_start_event.wait()
+                measurement_started = True
+                measurement_deadline_epoch = config.measurement_start_epoch.value + config.duration_seconds
+                continue
+            benchmark_run_id = config.warmup_benchmark_run_id
+            if benchmark_run_id is None:
+                raise RuntimeError("Warmup benchmark_run_id is required when warmup_seconds is greater than zero.")
+
         sequence_no = worker_global_id + (local_counter * config.total_workers)
         local_counter += 1
-        payload = build_iteration_payload(sequence_no, config.seed, config.benchmark_run_id)
+        payload = build_iteration_payload(sequence_no, config.seed, benchmark_run_id)
 
         if config.mode == "pipeline" and config.pipeline_style == "deep" and config.pipeline_depth > 1:
             batch_payloads = [payload]
-            while len(batch_payloads) < config.pipeline_depth and time.time() < stop_at_epoch:
+            while len(batch_payloads) < config.pipeline_depth:
                 sequence_no = worker_global_id + (local_counter * config.total_workers)
                 local_counter += 1
                 batch_payloads.append(
-                    build_iteration_payload(sequence_no, config.seed, config.benchmark_run_id)
+                    build_iteration_payload(sequence_no, config.seed, benchmark_run_id)
                 )
 
             batch_started = perf_counter()
@@ -911,15 +980,16 @@ def worker_duration_loop(
                     f"Database error: {exc}"
                 ) from exc
 
-            batch_elapsed_ms = (perf_counter() - batch_started) * 1000.0
-            per_txn_ms = batch_elapsed_ms / len(batch_payloads)
-            latencies_ms.extend([per_txn_ms] * len(batch_payloads))
-            completed_total += len(batch_payloads)
-            progress_completed += len(batch_payloads)
-            if progress_completed >= PROGRESS_FLUSH_EVERY:
-                flush_progress(progress_queue, config.process_id, progress_completed, progress_retries)
-                progress_completed = 0
-                progress_retries = 0
+            if measurement_started:
+                batch_elapsed_ms = (perf_counter() - batch_started) * 1000.0
+                per_txn_ms = batch_elapsed_ms / len(batch_payloads)
+                latencies_ms.extend([per_txn_ms] * len(batch_payloads))
+                completed_total += len(batch_payloads)
+                progress_completed += len(batch_payloads)
+                if progress_completed >= PROGRESS_FLUSH_EVERY:
+                    flush_progress(progress_queue, config.process_id, progress_completed, progress_retries)
+                    progress_completed = 0
+                    progress_retries = 0
             continue
 
         attempt = 0
@@ -930,19 +1000,21 @@ def worker_duration_loop(
                     execute_non_pipeline_iteration(conn, payload)
                 else:
                     execute_pipeline_transaction_iteration(conn, payload)
-                latencies_ms.append((perf_counter() - txn_started) * 1000.0)
-                completed_total += 1
-                progress_completed += 1
-                if progress_completed >= PROGRESS_FLUSH_EVERY:
-                    flush_progress(progress_queue, config.process_id, progress_completed, progress_retries)
-                    progress_completed = 0
-                    progress_retries = 0
+                if measurement_started:
+                    latencies_ms.append((perf_counter() - txn_started) * 1000.0)
+                    completed_total += 1
+                    progress_completed += 1
+                    if progress_completed >= PROGRESS_FLUSH_EVERY:
+                        flush_progress(progress_queue, config.process_id, progress_completed, progress_retries)
+                        progress_completed = 0
+                        progress_retries = 0
                 break
             except psycopg.Error as exc:
                 if is_retryable_transaction_error(exc) and attempt < config.max_retries:
                     attempt += 1
-                    retries_total += 1
-                    progress_retries += 1
+                    if measurement_started:
+                        retries_total += 1
+                        progress_retries += 1
                     try:
                         conn.rollback()
                     except Exception:
@@ -958,6 +1030,7 @@ def worker_duration_loop(
         iterations_completed=completed_total,
         retry_count=retries_total,
         latencies_ms=latencies_ms,
+        gateway_region=gateway_region,
     )
 
 
@@ -1000,8 +1073,6 @@ def process_entry(config: ProcessConfig, progress_queue: mp.Queue) -> None:
                     "application_name": app_name,
                 }
             )
-
-            started_at_epoch = time.time()
             with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix=f"proc{config.process_id}") as executor:
                 futures = []
                 for worker_global_id in config.worker_global_ids:
@@ -1012,7 +1083,6 @@ def process_entry(config: ProcessConfig, progress_queue: mp.Queue) -> None:
                             config,
                             worker_global_id,
                             progress_queue,
-                            started_at_epoch,
                         )
                     )
 
@@ -1021,8 +1091,10 @@ def process_entry(config: ProcessConfig, progress_queue: mp.Queue) -> None:
         total_iterations = sum(outcome.iterations_completed for outcome in outcomes)
         total_retries = sum(outcome.retry_count for outcome in outcomes)
         latencies_ms: list[float] = []
+        gateway_regions: list[str] = []
         for outcome in outcomes:
             latencies_ms.extend(outcome.latencies_ms)
+            gateway_regions.append(outcome.gateway_region)
 
         progress_queue.put(
             {
@@ -1031,6 +1103,7 @@ def process_entry(config: ProcessConfig, progress_queue: mp.Queue) -> None:
                 "iterations_completed": total_iterations,
                 "retry_count": total_retries,
                 "latencies_ms": latencies_ms,
+                "gateway_regions": gateway_regions,
             }
         )
     except Exception as exc:
@@ -1048,12 +1121,13 @@ def run_worker_in_process(
     config: ProcessConfig,
     worker_global_id: int,
     progress_queue: mp.Queue,
-    started_at_epoch: float,
 ) -> WorkerOutcome:
     with pool.connection() as conn:
+        gateway_region = detect_connection_gateway_region(conn)
+        wait_for_workload_start(config)
         if config.work_mode == "iterations":
-            return worker_iteration_loop(conn, config, worker_global_id, progress_queue)
-        return worker_duration_loop(conn, config, worker_global_id, progress_queue, started_at_epoch)
+            return worker_iteration_loop(conn, config, worker_global_id, progress_queue, gateway_region)
+        return worker_duration_loop(conn, config, worker_global_id, progress_queue, gateway_region)
 
 
 def fetch_table_counts(conn: psycopg.Connection, benchmark_run_id: UUID) -> dict[str, int]:
@@ -1089,6 +1163,7 @@ def print_result(result: BenchmarkResult) -> None:
     print(f"{result.name}:")
     print(f"  mode             : {result.mode}")
     print(f"  benchmark_run_id : {result.benchmark_run_id}")
+    print(f"  warmup run id    : {result.warmup_benchmark_run_id}")
     print(f"  work mode        : {result.work_mode}")
     print(f"  workers          : {result.worker_count}")
     print(f"  processes        : {result.process_count}")
@@ -1096,6 +1171,8 @@ def print_result(result: BenchmarkResult) -> None:
     print(f"  retries          : {result.retry_count:,}")
     print(f"  iterations       : {result.iterations_completed:,}")
     print(f"  rows inserted    : {result.rows_inserted:,}")
+    print(f"  warmup seconds   : {result.warmup_seconds:.1f}")
+    print(f"  duration seconds : {result.requested_duration_seconds}")
     print(f"  total runtime    : {result.elapsed_seconds:.6f} seconds")
     print(f"  txns / second    : {result.txns_per_second:,.2f}")
     print(f"  rows / second    : {result.rows_per_second:,.2f}")
@@ -1111,6 +1188,19 @@ def print_counts(label: str, counts: dict[str, int]) -> None:
     print(f"{label} row counts for this benchmark run:")
     for table_name in TABLE_NAMES:
         print(f"  {table_name:<14}: {counts[table_name]:,}")
+
+
+def print_gateway_connection_counts(label: str, gateway_connection_counts: dict[str, int]) -> None:
+    print(f"{label} gateway connections:")
+    gateway_header = "Gateway"
+    count_header = "No of Connections"
+    print(f"  {gateway_header:<30}{count_header}")
+    print(f"  {'-' * len(gateway_header):<30}{'-' * len(count_header)}")
+    for gateway_region, connection_count in sorted(
+        gateway_connection_counts.items(),
+        key=lambda item: (-item[1], item[0]),
+    ):
+        print(f"  {gateway_region:<30}{connection_count}")
 
 
 def maybe_setup_tables(db_uri: str, application_name: str) -> None:
@@ -1147,6 +1237,7 @@ def build_result_payload(
     setup_tables: bool,
     iterations_requested: int,
     duration_seconds: float | None,
+    warmup_seconds: float,
     seed: int,
 ) -> dict[str, object]:
     return {
@@ -1154,9 +1245,13 @@ def build_result_payload(
         "mode": result.mode,
         "benchmark_name": result.name,
         "benchmark_run_id": str(result.benchmark_run_id),
+        "warmup_benchmark_run_id": (
+            str(result.warmup_benchmark_run_id) if result.warmup_benchmark_run_id is not None else None
+        ),
         "work_mode": result.work_mode,
         "iterations_requested": iterations_requested,
         "duration_seconds": duration_seconds,
+        "warmup_seconds": warmup_seconds,
         "iterations_completed": result.iterations_completed,
         "rows_inserted": result.rows_inserted,
         "elapsed_seconds": result.elapsed_seconds,
@@ -1177,6 +1272,7 @@ def build_result_payload(
         "setup_tables": setup_tables,
         "seed": seed,
         "table_counts_for_run": counts,
+        "gateway_connection_counts": result.gateway_connection_counts,
     }
 
 
@@ -1209,11 +1305,13 @@ def assign_workers(total_workers: int, process_count: int) -> list[ProcessAssign
 def run_multiprocess_benchmark(
     db_uri: str,
     benchmark_run_id: UUID,
+    warmup_benchmark_run_id: UUID | None,
     mode: str,
     pipeline_style: str,
     pipeline_depth: int,
     iterations: int,
     duration_seconds: float | None,
+    warmup_seconds: float,
     workers: int,
     processes: int,
     max_retries: int,
@@ -1248,14 +1346,19 @@ def run_multiprocess_benchmark(
         )
     else:
         log(
-            f"Starting {mode} benchmark in duration mode for {duration_seconds:.1f} seconds using "
-            f"{actual_worker_count} workers across {len(assignments)} processes."
+            f"Starting {mode} benchmark in duration mode for {duration_seconds:.1f} measured seconds "
+            f"using {actual_worker_count} workers across {len(assignments)} processes."
         )
         tracker = ProgressTracker(
             label=f"{mode} benchmark progress",
             progress_seconds=progress_seconds,
             duration_seconds=duration_seconds,
         )
+        if warmup_seconds > 0:
+            log(
+                f"Warmup is enabled for an additional {warmup_seconds:.1f} seconds before measured "
+                "benchmark accounting begins."
+            )
 
     if mode == "pipeline" and pipeline_style == "deep":
         log(
@@ -1268,9 +1371,13 @@ def run_multiprocess_benchmark(
     ctx = mp.get_context("spawn")
     progress_queue: mp.Queue = ctx.Queue()
     process_objects: list[mp.Process] = []
+    workload_start_event = ctx.Event()
+    measurement_start_event = ctx.Event()
+    workload_start_epoch = ctx.Value("d", 0.0)
+    measurement_start_epoch = ctx.Value("d", 0.0)
 
-    started_at_utc = datetime.now(UTC).isoformat()
-    started = perf_counter()
+    started_at_utc = ""
+    measured_started = 0.0
 
     for assignment in assignments:
         config = ProcessConfig(
@@ -1279,6 +1386,7 @@ def run_multiprocess_benchmark(
             total_workers=actual_worker_count,
             db_uri=db_uri,
             benchmark_run_id=benchmark_run_id,
+            warmup_benchmark_run_id=warmup_benchmark_run_id,
             mode=mode,
             pipeline_style=pipeline_style,
             pipeline_depth=pipeline_depth,
@@ -1287,8 +1395,13 @@ def run_multiprocess_benchmark(
             work_mode=work_mode,
             iterations=iterations,
             duration_seconds=duration_seconds,
+            warmup_seconds=warmup_seconds,
             seed=seed,
             application_name_prefix=application_name_prefix,
+            workload_start_event=workload_start_event,
+            measurement_start_event=measurement_start_event,
+            workload_start_epoch=workload_start_epoch,
+            measurement_start_epoch=measurement_start_epoch,
         )
         process_obj = ctx.Process(
             target=process_entry,
@@ -1303,13 +1416,23 @@ def run_multiprocess_benchmark(
     total_retries = 0
     total_iterations_completed = 0
     all_latencies_ms: list[float] = []
+    gateway_connection_counts: Counter[str] = Counter()
+    warmup_ready_workers = 0
+    workload_started = False
+    measurement_started = work_mode == "iterations" or warmup_seconds == 0
     next_progress_log = perf_counter() + progress_seconds
 
     try:
         while results_received < len(assignments):
             now = perf_counter()
-            if now >= next_progress_log:
+            if measurement_started and measured_started and now >= next_progress_log:
                 tracker.log_snapshot()
+                next_progress_log = now + progress_seconds
+            elif work_mode == "duration" and warmup_seconds > 0 and workload_started and not measurement_started and now >= next_progress_log:
+                log(
+                    f"Warmup progress: workers ready for measured phase "
+                    f"{warmup_ready_workers}/{actual_worker_count}."
+                )
                 next_progress_log = now + progress_seconds
 
             try:
@@ -1325,6 +1448,32 @@ def run_multiprocess_benchmark(
                     f"(application_name={message['application_name']}). "
                     f"Ready processes: {ready_processes}/{len(assignments)}"
                 )
+                if ready_processes == len(assignments) and not workload_started:
+                    workload_started = True
+                    start_epoch = time.time()
+                    workload_start_epoch.value = start_epoch
+                    if measurement_started:
+                        measurement_start_epoch.value = start_epoch
+                        measured_started = perf_counter()
+                        started_at_utc = datetime.now(UTC).isoformat()
+                        tracker.reset()
+                        log("All processes ready. Starting measured benchmark workload now.")
+                        measurement_start_event.set()
+                    else:
+                        log("All processes ready. Starting warmup workload now.")
+                    workload_start_event.set()
+                continue
+
+            if msg_type == "warmup_ready":
+                warmup_ready_workers += 1
+                if warmup_ready_workers == actual_worker_count and not measurement_started:
+                    measurement_started = True
+                    measurement_start_epoch.value = time.time()
+                    measured_started = perf_counter()
+                    started_at_utc = datetime.now(UTC).isoformat()
+                    tracker.reset()
+                    log("Warmup complete across all workers. Starting measured benchmark accounting now.")
+                    measurement_start_event.set()
                 continue
 
             if msg_type == "progress":
@@ -1336,12 +1485,13 @@ def run_multiprocess_benchmark(
                 total_iterations_completed += message["iterations_completed"]
                 total_retries += message["retry_count"]
                 all_latencies_ms.extend(message["latencies_ms"])
+                gateway_connection_counts.update(message.get("gateway_regions", []))
                 continue
 
             if msg_type == "error":
                 raise RuntimeError(f"Process {message['process_id']} failed: {message['error']}")
 
-        elapsed = perf_counter() - started
+        elapsed = (perf_counter() - measured_started) if measured_started else 0.0
         tracker.log_snapshot(final=True)
     finally:
         for process_obj in process_objects:
@@ -1387,6 +1537,10 @@ def run_multiprocess_benchmark(
         pipeline_style=pipeline_style,
         pipeline_depth=pipeline_depth if mode == "pipeline" else 1,
         application_name_prefix=application_name_prefix,
+        gateway_connection_counts=dict(gateway_connection_counts),
+        warmup_seconds=warmup_seconds,
+        requested_duration_seconds=duration_seconds,
+        warmup_benchmark_run_id=warmup_benchmark_run_id,
     )
 
 
@@ -1397,6 +1551,7 @@ def execute_benchmark_mode(
     pipeline_depth: int,
     iterations: int,
     duration_seconds: float | None,
+    warmup_seconds: float,
     seed: int,
     setup_tables: bool,
     workers: int,
@@ -1407,6 +1562,7 @@ def execute_benchmark_mode(
     application_name_prefix: str,
 ) -> tuple[BenchmarkResult, dict[str, int]]:
     benchmark_run_id = uuid4()
+    warmup_benchmark_run_id = uuid4() if duration_seconds is not None and warmup_seconds > 0 else None
 
     if setup_tables:
         maybe_setup_tables(
@@ -1417,11 +1573,13 @@ def execute_benchmark_mode(
     result = run_multiprocess_benchmark(
         db_uri=db_uri,
         benchmark_run_id=benchmark_run_id,
+        warmup_benchmark_run_id=warmup_benchmark_run_id,
         mode=mode,
         pipeline_style=pipeline_style,
         pipeline_depth=pipeline_depth,
         iterations=iterations,
         duration_seconds=duration_seconds,
+        warmup_seconds=warmup_seconds,
         workers=workers,
         processes=processes,
         max_retries=max_retries,
@@ -1440,6 +1598,7 @@ def execute_benchmark_mode(
 
     print_result(result)
     print_counts(result.name, counts)
+    print_gateway_connection_counts(result.name, result.gateway_connection_counts)
     print()
     return result, counts
 
@@ -1461,6 +1620,9 @@ def main() -> int:
     if args.duration_seconds is not None and args.duration_seconds <= 0:
         print("--duration-seconds must be greater than zero.", file=sys.stderr)
         return 2
+    if args.warmup_seconds < 0:
+        print("--warmup-seconds cannot be negative.", file=sys.stderr)
+        return 2
     if args.workers <= 0:
         print("--workers must be greater than zero.", file=sys.stderr)
         return 2
@@ -1478,6 +1640,9 @@ def main() -> int:
         return 2
     if args.mode == "non-pipeline" and args.pipeline_style != "transaction":
         print("--pipeline-style only applies to pipeline mode.", file=sys.stderr)
+        return 2
+    if args.warmup_seconds > 0 and args.duration_seconds is None:
+        print("--warmup-seconds requires --duration-seconds.", file=sys.stderr)
         return 2
     if not args.setup_only and not args.mode:
         print("Either --setup-only or --mode must be provided.", file=sys.stderr)
@@ -1523,6 +1688,7 @@ def main() -> int:
                 pipeline_depth=1,
                 iterations=args.iterations,
                 duration_seconds=args.duration_seconds,
+                warmup_seconds=args.warmup_seconds,
                 seed=args.seed,
                 setup_tables=args.setup_tables,
                 workers=args.workers,
@@ -1539,6 +1705,7 @@ def main() -> int:
                 pipeline_depth=args.pipeline_depth,
                 iterations=args.iterations,
                 duration_seconds=args.duration_seconds,
+                warmup_seconds=args.warmup_seconds,
                 seed=args.seed,
                 setup_tables=args.setup_tables,
                 workers=args.workers,
@@ -1555,6 +1722,7 @@ def main() -> int:
                     "mode": "both",
                     "iterations_requested": args.iterations,
                     "duration_seconds": args.duration_seconds,
+                    "warmup_seconds": args.warmup_seconds,
                     "seed": args.seed,
                     "setup_tables": args.setup_tables,
                     "workers_requested": args.workers,
@@ -1567,6 +1735,7 @@ def main() -> int:
                             setup_tables=args.setup_tables,
                             iterations_requested=args.iterations,
                             duration_seconds=args.duration_seconds,
+                            warmup_seconds=args.warmup_seconds,
                             seed=args.seed,
                         ),
                         build_result_payload(
@@ -1576,6 +1745,7 @@ def main() -> int:
                             setup_tables=args.setup_tables,
                             iterations_requested=args.iterations,
                             duration_seconds=args.duration_seconds,
+                            warmup_seconds=args.warmup_seconds,
                             seed=args.seed,
                         ),
                     ],
@@ -1590,6 +1760,7 @@ def main() -> int:
             pipeline_depth=args.pipeline_depth if args.mode == "pipeline" else 1,
             iterations=args.iterations,
             duration_seconds=args.duration_seconds,
+            warmup_seconds=args.warmup_seconds,
             seed=args.seed,
             setup_tables=args.setup_tables,
             workers=args.workers,
@@ -1607,6 +1778,7 @@ def main() -> int:
                 setup_tables=args.setup_tables,
                 iterations_requested=args.iterations,
                 duration_seconds=args.duration_seconds,
+                warmup_seconds=args.warmup_seconds,
                 seed=args.seed,
             )
             write_json_results(args.json_out, payload)

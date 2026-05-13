@@ -51,6 +51,10 @@
 26. The benchmark rows should now include variable-length payload text so inserted row payload lands roughly in the 250-300 byte range.
 27. The benchmark schema should now include many more non-key columns to better resemble a real customer table.
 28. Extra secondary indexes should remain separate from table creation and be applied from standalone SQL files.
+29. Duration-mode benchmarks should support an additive warmup period controlled by `--warmup-seconds`, defaulting to `0`.
+30. Warmup traffic should not contribute to reported throughput, latency, or measured row counts.
+31. Warmup and measured rows should use separate `benchmark_run_id` values so measured validation remains exact.
+32. Gateway-region reporting should summarize which CockroachDB gateway each persistent worker connection actually used.
 
 ## Implementation Notes
 - The benchmark script uses `psycopg3` plus `psycopg_pool`; SQLAlchemy was not necessary.
@@ -84,6 +88,11 @@
   - progress is aggregated across all processes
 - Iteration payloads are now generated on demand instead of prebuilding one giant payload list in memory.
 - A sustained duration mode is now supported via `--duration-seconds`.
+- Duration mode now also supports additive warmup via `--warmup-seconds`:
+  - warmup runs on the same worker connections before measurement starts
+  - warmup uses a separate benchmark run ID
+  - workers switch into measured mode only at a safe transaction or deep-batch boundary
+  - measured throughput still divides by the configured `--duration-seconds`, not by any longer drain time
 - Latency stats now include:
   - average latency
   - p95 latency
@@ -145,6 +154,8 @@
   - `python benchmark_crdb_pipeline.py --mode pipeline --workers 48 --processes 4`
 - Run in sustained duration mode:
   - `python benchmark_crdb_pipeline.py --mode pipeline --workers 48 --processes 4 --duration-seconds 60`
+- Run with warmup plus measured duration mode:
+  - `python benchmark_crdb_pipeline.py --mode pipeline --pipeline-style deep --pipeline-depth 8 --workers 48 --processes 4 --warmup-seconds 60 --duration-seconds 300`
 - Write a per-region JSON result file:
   - `python benchmark_crdb_pipeline.py --mode pipeline --region-label us-east --json-out results-us-east.json`
 - Aggregate multiple regional result files:

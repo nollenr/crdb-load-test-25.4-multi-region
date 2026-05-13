@@ -81,6 +81,15 @@ The benchmark supports two execution shapes:
   Run continuously for a fixed number of seconds with `--duration-seconds`.
 
 Duration mode is useful when you want a sustained throughput number instead of a finite batch test.
+It also supports an optional additive warmup window with `--warmup-seconds` so warmup traffic is excluded from reported metrics.
+
+When warmup is enabled, the script:
+
+- keeps the same worker connections alive across warmup and measurement
+- uses a separate benchmark run ID for warmup rows
+- waits for each worker to finish its current transaction or deep batch before entering measured mode
+- starts measured accounting only after all workers are ready
+- reports throughput, latency, and validation counts from the measured phase only
 
 ## Table Setup
 
@@ -252,6 +261,12 @@ Run in sustained duration mode:
 python3.11 benchmark_crdb_pipeline.py --mode pipeline --workers 48 --processes 4 --duration-seconds 60
 ```
 
+Run with a 60-second warmup plus a 300-second measured window:
+
+```bash
+python3.11 benchmark_crdb_pipeline.py --mode pipeline --pipeline-style deep --pipeline-depth 8 --workers 48 --processes 4 --warmup-seconds 60 --duration-seconds 300
+```
+
 Run a benchmark and write a regional JSON result file:
 
 ```bash
@@ -357,9 +372,11 @@ If `--json-out` is provided, the script also writes a JSON file containing:
 - region label
 - benchmark mode
 - benchmark run ID
+- optional warmup benchmark run ID
 - iterations completed
 - rows inserted
 - elapsed seconds
+- warmup seconds
 - transactions per second
 - average ms per iteration
 - rows per second
@@ -371,6 +388,7 @@ If `--json-out` is provided, the script also writes a JSON file containing:
 - p95 latency
 - p99 latency
 - table counts for the current run
+- gateway connection counts
 - start and finish timestamps
 
 This JSON output is intended to be aggregated later across regions with `aggregate_results.py`.
@@ -445,13 +463,14 @@ python3.11 aggregate_results.py pipeline.json \
 
 -- use this to aggregate files from the pipeline-deep  
 python3.11 aggregate_results.py pipeline-deep.json \
-  --remote-host 192.168.4.108 \
+  --remote-host 192.168.4.126 \
   --remote-host 192.168.5.116 \
   --remote-file pipeline-deep.json
 
 
 curl --create-dirs -o $HOME/.postgresql/root.crt 'https://cockroachlabs.cloud/clusters/805f39ab-1191-48da-87c2-0d9f215a9526/cert'
-rsync -avzP ec2-user@192.168.3.118:~/Pipeline-Test/ ~/Pipeline-Test/
+##  CHANGE THE IP ADDRESS IN THE NEXT LINE
+rsync -avzP ec2-user@192.168.3.100:~/Pipeline-Test/ ~/Pipeline-Test/
 sudo yum install -y gcc
 sudo yum install -y python3.11 python3.11-devel python3.11-pip.noarch || true
 pip3.11 install -U pip

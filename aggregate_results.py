@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 
@@ -54,6 +55,16 @@ def load_results(path_str: str) -> list[dict[str, object]]:
 
 def format_number(value: float) -> str:
     return f"{value:,.2f}"
+
+
+def format_gateway_counts(gateway_counts: dict[str, object]) -> str:
+    if not gateway_counts:
+        return "none reported"
+    items = sorted(
+        ((str(gateway), int(count)) for gateway, count in gateway_counts.items()),
+        key=lambda item: (-item[1], item[0]),
+    )
+    return ", ".join(f"{gateway}={count}" for gateway, count in items)
 
 
 def fetch_remote_results(
@@ -133,6 +144,20 @@ def main() -> int:
     total_workers = sum(int(result.get("worker_count", 0)) for result in all_results)
     total_processes = sum(int(result.get("process_count", 0)) for result in all_results)
     total_retries = sum(int(result.get("retry_count", 0)) for result in all_results)
+    warmup_seconds_values = {float(result.get("warmup_seconds", 0.0)) for result in all_results}
+    duration_seconds_values = {
+        float(result["duration_seconds"])
+        for result in all_results
+        if result.get("duration_seconds") is not None
+    }
+    aggregate_gateway_counts: Counter[str] = Counter()
+    for result in all_results:
+        aggregate_gateway_counts.update(
+            {
+                str(gateway): int(count)
+                for gateway, count in dict(result.get("gateway_connection_counts", {})).items()
+            }
+        )
 
     print("Aggregate Benchmark Summary:")
     print(f"  mode                : {mode}")
@@ -142,8 +167,23 @@ def main() -> int:
     print(f"  total retries       : {total_retries:,}")
     print(f"  total iterations    : {total_iterations:,}")
     print(f"  total rows          : {total_rows:,}")
+    if warmup_seconds_values:
+        warmup_display = (
+            format_number(next(iter(warmup_seconds_values)))
+            if len(warmup_seconds_values) == 1
+            else "mixed"
+        )
+        print(f"  warmup seconds      : {warmup_display}")
+    if duration_seconds_values:
+        duration_display = (
+            format_number(next(iter(duration_seconds_values)))
+            if len(duration_seconds_values) == 1
+            else "mixed"
+        )
+        print(f"  duration seconds    : {duration_display}")
     print(f"  aggregate txns/sec  : {format_number(total_txns_per_second)}")
     print(f"  aggregate rows/sec  : {format_number(total_rows_per_second)}")
+    print(f"  gateway mix         : {format_gateway_counts(dict(aggregate_gateway_counts))}")
     print()
     print("Per-region breakdown:")
     for result in all_results:
@@ -160,6 +200,7 @@ def main() -> int:
         avg_latency_ms = float(result.get("avg_latency_ms", 0.0))
         p95_latency_ms = float(result.get("p95_latency_ms", 0.0))
         p99_latency_ms = float(result.get("p99_latency_ms", 0.0))
+        gateway_counts = dict(result.get("gateway_connection_counts", {}))
         print(
             f"  {region_label}: "
             f"txns/sec {format_number(txns_per_second)}, "
@@ -168,7 +209,8 @@ def main() -> int:
             f"processes {process_count}, "
             f"retries {retry_count}, "
             f"avg/p95/p99 latency {format_number(avg_latency_ms)}/{format_number(p95_latency_ms)}/{format_number(p99_latency_ms)} ms, "
-            f"run_id {result['benchmark_run_id']}"
+            f"run_id {result['benchmark_run_id']}, "
+            f"gateways {format_gateway_counts(gateway_counts)}"
         )
 
     return 0
