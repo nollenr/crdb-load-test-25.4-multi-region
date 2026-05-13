@@ -411,7 +411,7 @@ The script will fail with an error if:
 - [ ] maintenance window created
 - [ ] allow the public IP to access the cluster: 3.145.166.148 (us-east-2), 34.215.124.67 (us-west-2), 44.204.64.200 (us-east-1)
 - [ ] curl --create-dirs -o $HOME/.postgresql/root.crt 'https://cockroachlabs.cloud/clusters/23adc7a4-68d6-4a0b-b2cc-86df5bfb0c1a/cert'
-- [ ] rsync -avzP ec2-user@192.168.3.110:~/Pipeline-Test/ ~/Pipeline-Test/
+- [ ] rsync -avzP ec2-user@192.168.3.118:~/Pipeline-Test/ ~/Pipeline-Test/
 - [ ]   sudo yum install -y gcc
   sudo yum install -y python3.11 python3.11-devel python3.11-pip.noarch || true
   pip3.11 install -U pip
@@ -445,6 +445,45 @@ python3.11 aggregate_results.py pipeline.json \
 
 -- use this to aggregate files from the pipeline-deep  
 python3.11 aggregate_results.py pipeline-deep.json \
-  --remote-host 192.168.4.125 \
-  --remote-host 192.168.5.113 \
+  --remote-host 192.168.4.108 \
+  --remote-host 192.168.5.116 \
   --remote-file pipeline-deep.json
+
+
+curl --create-dirs -o $HOME/.postgresql/root.crt 'https://cockroachlabs.cloud/clusters/805f39ab-1191-48da-87c2-0d9f215a9526/cert'
+rsync -avzP ec2-user@192.168.3.118:~/Pipeline-Test/ ~/Pipeline-Test/
+sudo yum install -y gcc
+sudo yum install -y python3.11 python3.11-devel python3.11-pip.noarch || true
+pip3.11 install -U pip
+pip3.11 install "dbworkload[postgres]"
+cd Pipeline-Test
+python3.11 -m pip install -r requirements.txt
+curl -fsSL "https://binaries.cockroachdb.com/cockroach-v25.4.9.linux-amd64.tgz" | tar -xz
+sudo install -m 0755 "cockroach-v25.4.9.linux-amd64/cockroach" /usr/local/bin/cockroach
+echo Source env script!
+
+# Test
+python3.11 benchmark_crdb_pipeline.py --mode pipeline --pipeline-style deep --pipeline-depth 8 --workers 48 --processes 4 --duration-seconds 60 --json-out pipeline-deep.json
+
+
+
+## Watching the app server:
+vmstat 1   
+# r is number of tasks waiting for cpu, us/sy is the CPU Busy percent
+# wa is disk I/O wait
+# swap memory pressure
+
+mpstat -P ALL 1
+# Add the percents and that gives total.  100% is just too high
+# %iowait = storage wait
+# %steal hypervisor contention
+# %irq - is there an irq storm?
+
+pidstat -u -r -d -h 1
+# sum of python3.11 processes is the CPU being used by the benchmark
+# RSS is resident memory usage  47mb is tiny
+# kB_rd/s / kB_wr/s is disk
+# %system nontrivial fits socket/kernel from DB traffic
+
+sar -n DEV 1
+# ens5: 1,023 kB/s (~ 1MB/s) in / 4,028 KB/s (~4MB/s) out for EC2, not remotely high enough to suggest NIC saturation.  Packet counts high relative to byte rate means lots of relatively small network ops.  Matches db request/responses, commits, protcol, chatter, etc.

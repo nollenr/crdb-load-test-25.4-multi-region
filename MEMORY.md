@@ -113,11 +113,13 @@
 - Because this workspace is being used as persistent memory, do not store live credentials in this file. Keep only redacted examples.
 
 ## Files Created
+- `.gitignore`
 - `aggregate_results.py`
 - `benchmark_crdb_pipeline.py`
 - `indexes_5.sql`
 - `indexes_10.sql`
 - `README.md`
+- `RESULTS-READOUT-INDEX.md`
 - `RESULTS-READOUT.md`
 - `requirements.txt`
 - `MEMORY.md`
@@ -158,7 +160,7 @@
   - customer target in records/sec
   - final 3-region results for less aggressive and more aggressive client modes
   - historical old-schema baselines
-  - a placeholder section for CockroachDB UI CPU screenshots
+  - embedded CockroachDB UI screenshots for CPU, open SQL sessions, SQL queries/sec, network bytes sent, and service latency
 - The latest headline aggressive-client result in `RESULTS-READOUT.md` now reflects the 300-second sustained run:
   - `40,672.22 records/sec`
   - `5,810.32 logical units/sec`
@@ -200,6 +202,7 @@
 
 ## Workspace Notes
 - Initial workspace scan suggests the directory was empty before creating these files.
+- Added `.gitignore` with `env.advanced*.sh` so the three advanced environment shell scripts stay out of Git unless they were already tracked.
 - Added `RESULTS-READOUT-INDEX.md` to track multi-region rows/sec as index counts increase.
 - Current baseline for the widened schema with no extra secondary indexes, aggressive client, 3 regions:
   - aggregate rows/sec: `31,319.52`
